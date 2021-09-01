@@ -1,0 +1,106 @@
+package Amazon;
+
+import Elements.Manager;
+import Elements.Worker;
+
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.*;
+
+public class EC2 {
+
+    private final String amiId;
+    private final Ec2Client ec2;
+    private final String instanceId;
+    private final Region region = Region.US_EAST_1;
+
+
+    public EC2(String bucket, String type) {
+        this.amiId = "ami-081475026498ccd01";
+        ec2 = Ec2Client.builder().region(region)
+                .build();
+
+        if(type.equals("Manager")) {
+            instanceId = startManager(bucket);
+        }
+        else{//"Worker"
+            instanceId = startWorker(bucket);
+        }
+    }
+
+    public String startManager(String bucket) {
+        String managerId = getManager();
+        if (managerId != null) {
+            System.out.println("Manager Connected " + managerId);
+            return managerId;
+        } else return createInstance("manager-" + System.currentTimeMillis(), Manager.getUserData(bucket));
+    }
+
+    private String startWorker(String bucket) {
+        return createInstance("worker-" + System.currentTimeMillis(), Worker.getUserData(bucket));
+    }
+
+    private String getManager() {
+        DescribeInstancesRequest request = DescribeInstancesRequest.builder().build();
+        DescribeInstancesResponse response = ec2.describeInstances(request);
+        for (Reservation reservation : response.reservations()) {
+            for (Instance instance : reservation.instances()) {
+                for (Tag tag : instance.tags())
+                    if (tag.key().equals("Type"))
+                        if (tag.value().equals("manager") && instance.state().name() == InstanceStateName.RUNNING)
+                            return instance.instanceId();
+            }
+        }
+        return null;
+    }
+
+    public String createInstance(String name, String userData) {
+        IamInstanceProfileSpecification role = IamInstanceProfileSpecification.builder()
+                .name("MyIAM")
+                .build();
+
+        RunInstancesRequest runRequest = RunInstancesRequest
+                .builder()
+                .instanceType(InstanceType.T2_LARGE)
+                .imageId(amiId)
+                .maxCount(1)
+                .minCount(1)
+                .userData(userData)
+                .keyName("DorKey")                    // SSH
+                .securityGroupIds("sg-7bdaa87b")
+                .iamInstanceProfile(role)
+                .build();
+
+        RunInstancesResponse response = ec2.runInstances(runRequest);
+        String instanceId = response.instances().get(0).instanceId();
+
+        Tag nameTag = Tag.builder()
+                .key("Name")
+                .value(name)
+                .build();
+
+        Tag typeTag = Tag.builder()
+                .key("Type")
+                .value(name.split("-")[0])
+                .build();
+
+        CreateTagsRequest tagRequest = CreateTagsRequest.builder()
+                .resources(instanceId)
+                .tags(nameTag, typeTag)
+                .build();
+
+        ec2.createTags(tagRequest);
+        System.out.println("EC2 "+name+" running");
+        return instanceId;
+    }
+
+    public void terminate() {
+        ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(instanceId)
+                .build());
+        System.out.println("EC2 terminated: " + instanceId);
+    }
+
+    public String getInstanceId() {
+        return instanceId;
+    }
+}
