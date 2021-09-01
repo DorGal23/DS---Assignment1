@@ -1,8 +1,8 @@
 # DS---Assignment1
-README
 Nitay Marciano : 203343132
 Dor Gal : 308575588
 Assignment 1
+
 Structure:
 In this project, we used three different elements, three AWS services, and two special algorithms from Stanford.
 Elements:
