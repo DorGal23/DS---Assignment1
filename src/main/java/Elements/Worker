@@ -1,0 +1,139 @@
+package Elements;
+
+import Amazon.SQS;
+
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
+import org.json.simple.parser.ParseException;
+
+import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
+import software.amazon.awssdk.services.sqs.model.QueueDoesNotExistException;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+import Stanford.NamedEntityRecognitionHandler;
+import Stanford.SentimentAnalysisHandler;
+
+import java.io.*;
+import java.util.*;
+
+public class Worker implements Runnable {
+
+    private final SentimentAnalysisHandler analayzer = new SentimentAnalysisHandler();
+    private final NamedEntityRecognitionHandler recogniter = new NamedEntityRecognitionHandler();
+
+    public static void main(String[] args) throws IOException, ParseException {
+        ArrayList<Thread> threads = new ArrayList<>();
+        for (int i = 0; i < 3; ++i) {
+            Thread t = new Thread(new Worker());
+            t.start();
+            threads.add(t);
+        }
+        while (!threads.isEmpty()) {
+            for (Thread t : threads) {
+                try {
+                    t.join();
+                } catch (QueueDoesNotExistException e) {
+                    System.err.printf("Error in thread %s: Queue does not exist!", t.getName());
+                }
+                  catch (InterruptedException e) {
+                    e.printStackTrace();
+                    threads.remove(t);
+                    Thread newThread = new Thread(new Worker());
+                    newThread.start();
+                    threads.add(newThread);
+                }
+            }
+        }
+    }
+
+    @Override
+    public void run() {
+        SQS workersToManager = new SQS("workersToManager");
+        SQS managerToWorkers = new SQS("managerToWorkers");
+
+        while (true) {
+            JSONParser parser = new JSONParser();
+            List<Message> assignments;
+            try {
+                assignments = managerToWorkers.nextMessages(800, 8);
+            }
+            catch (QueueDoesNotExistException e){
+                break;
+            }
+            for (Message assignment : assignments) {
+                String toPrint = assignment.messageAttributes().get("Print").stringValue();
+                String sender = assignment.messageAttributes().get("Sender").stringValue();
+                String link, entities;
+                int sentiment, rating;
+                System.out.printf("Assignment Received: %s From: %s\n", toPrint, sender);
+                try{
+                    Object report = parser.parse(assignment.body());
+                    JSONObject jreview = (JSONObject) report;
+                    link = jreview.get("link").toString();
+                    sentiment = analayzer.findSentiment(jreview.get("text").toString());
+                    rating = Integer.parseInt(jreview.get("rating").toString());
+                    entities = recogniter.findEntities((String)jreview.get("text"));
+                } catch (ParseException e) {
+                    // parse doesn't let to print so we threw runtime
+                    throw new RuntimeException("Failed Assignment "+toPrint+" because "+e.getMessage());
+                }
+
+                sendReviewSummary(workersToManager, toPrint, sender, link, sentiment, rating, entities);
+                managerToWorkers.deleteMessage(assignment);
+                System.out.println("Assignment Completed: " + toPrint);
+            }
+        }
+    }
+
+    private void sendReviewSummary(SQS workerToManager, String toPrint, String sender, String link, Integer sentiment, Integer rating, String entities){
+        Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
+        MessageAttributeValue printAttribute = MessageAttributeValue.builder()
+                .dataType("String")
+                .stringValue(toPrint + " From " + sender + " Completed")
+                .build();
+        MessageAttributeValue reportAttribute = MessageAttributeValue.builder()
+                .dataType("String")
+                .stringValue(sender)
+                .build();
+        MessageAttributeValue linkAttribute = MessageAttributeValue.builder()
+                .dataType("String")
+                .stringValue(link)
+                .build();
+        MessageAttributeValue sentimentAttribute = MessageAttributeValue.builder()
+                .dataType("String")
+                .stringValue(sentiment.toString())
+                .build();
+        MessageAttributeValue ratingAttribute = MessageAttributeValue.builder()
+                .dataType("String")
+                .stringValue(rating.toString())
+                .build();
+        MessageAttributeValue entitiesAttribute = MessageAttributeValue.builder()
+                .dataType("String")
+                .stringValue(entities)
+                .build();
+        messageAttributes.put("Print", printAttribute);
+        messageAttributes.put("Sender", reportAttribute);
+        messageAttributes.put("Link", linkAttribute);
+        messageAttributes.put("Sentiment", sentimentAttribute);
+        messageAttributes.put("Rating", ratingAttribute);
+        messageAttributes.put("Entities", entitiesAttribute);
+
+        JSONObject messageBody = new JSONObject();
+        messageBody.put("link", link);
+        messageBody.put("sentiment", sentiment);
+        messageBody.put("rating", rating);
+        messageBody.put("entities", entities);
+
+        workerToManager.sendMessage(SendMessageRequest.builder()
+                .messageBody(messageBody.toJSONString())
+                .messageAttributes(messageAttributes)
+        );
+    }
+
+    public static String getUserData(String bucket) {
+        String cmd = "#!/bin/bash"+'\n'+
+                "wget https://"+bucket+".s3.amazonaws.com/Worker.jar"+'\n'+
+                "java -jar Worker.jar"+'\n';
+        return Base64.getEncoder().encodeToString(cmd.getBytes());
+    }
+}
